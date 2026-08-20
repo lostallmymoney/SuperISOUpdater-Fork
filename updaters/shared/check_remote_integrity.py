@@ -7,6 +7,7 @@ def check_remote_integrity(hash_url, local_file, hash_type, parse_hash_args, log
     """
     Fetch hash file from hash_url, parse the correct hash, and check integrity of local_file.
     parse_hash_args: ([match_strings_in_line], hash_position_in_line)
+    Returns: True if integrity OK, False if integrity FAIL, -1 if hash unavailable
     """
     RED = '\033[91m'
     RESET = '\033[0m'
@@ -21,7 +22,7 @@ def check_remote_integrity(hash_url, local_file, hash_type, parse_hash_args, log
         resp = robust_get(hash_url, delay=3, retries=10, logging_callback=logging_callback)
         if resp is None or resp.status_code != 200:
             logging_callback(f"{RED}[check_remote_integrity] Could not fetch hash file from {hash_url}, resp={resp}{RESET}")
-            return False
+            return -1  # Return -1 (unavailable) instead of False
         hashes = resp.text
         match_strings_in_line, hash_position_in_line = parse_hash_args
         if parse_hash_kwargs is None:

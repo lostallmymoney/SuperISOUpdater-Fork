@@ -70,22 +70,44 @@ class ChromeOS(GenericUpdater):
         return True
 
     def _get_archive_path(self) -> Path | None:
+        if not self.cur_edition_info:
+            self.logging_callback("No edition info available to determine archive path.")
+            return None
+        
         img_path = self._get_complete_normalized_file_path(
             absolute=True,
             latest=True
         )
         if not isinstance(img_path, Path):
+            self.logging_callback("Could not determine image path for archive.")
             return None
+        
+        # Create parent directory if it doesn't exist
+        try:
+            img_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            self.logging_callback(f"Failed to create parent directory: {e}")
+            return None
+        
         return img_path.with_suffix('.zip')
 
     def install_latest_version(self, retries: int = 3) -> bool | None:
         archive_path = self._get_archive_path()
         if not self.cur_edition_info or not isinstance(archive_path, Path):
+            self.logging_callback("Cannot proceed with installation: missing edition info or archive path.")
+            return None
+
+        # Ensure parent directory exists before download
+        try:
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            self.logging_callback(f"Failed to create directory for archive: {e}")
             return None
 
         img_path = archive_path.with_suffix("").with_suffix(".img")
         download_link = self._get_download_link()
         if not isinstance(download_link, str):
+            self.logging_callback("No valid download link for ChromeOS installation.")
             return None
 
         zip_size = self.cur_edition_info.get("zipfilesize")
@@ -104,6 +126,7 @@ class ChromeOS(GenericUpdater):
             )
 
             if not result:
+                self.logging_callback("Download failed for ChromeOS archive.")
                 return None
 
             sha1_sum = self.cur_edition_info.get("sha1")

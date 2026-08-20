@@ -1,57 +1,83 @@
-
 import requests
 import time
-from tqdm import tqdm
-import sys
 
-# --- robust_get: for in-memory requests only ---
-def robust_get(url: str, logging_callback, method: str = "GET", retries: int = 5, delay: float = 1.0, redirects=True, timeout: float = 10.0, **kwargs):
-    """
-    Robust HTTP(S) request with retry, returns a response-like object with .content and .iter_content().
-    """
+def robust_get(
+    url: str,
+    logging_callback,
+    method: str = "GET",
+    retries: int = 5,
+    delay: float = 1.0,
+    redirects=True,
+    timeout: float = 10.0,
+    **kwargs
+):
     def report(msg):
         logging_callback(msg)
-    # Log the URL being fetched using report()
+
     report(f"[robust_get] Fetching URL: {url}")
+
     attempt = 0
+    network_attempt = 0
+
     PERMANENT_FAILURE_STATUSES = {400, 401, 410, 422, 451}
     MAX_HTTP_RETRIES = retries if retries != -1 else 10
-    MAX_PERMANENT_RETRIES = 5
+    MAX_NETWORK_RETRIES = retries if retries != -1 else 10
+
     while True:
         try:
-            kwargs_no_headers = dict(kwargs)
-            headers = kwargs_no_headers.pop("headers", {}).copy()
-            resp = requests.request(method, url, headers=headers, timeout=timeout, allow_redirects=redirects, **kwargs_no_headers)
+            headers = kwargs.pop("headers", {}).copy()
+
+            resp = requests.request(
+                method,
+                url,
+                headers=headers,
+                timeout=timeout,
+                allow_redirects=redirects,
+                **kwargs
+            )
+
             if resp.status_code in {301, 302, 303, 307, 308}:
-                location = resp.headers.get('Location', '(no Location header)')
+                location = resp.headers.get("Location", "(no Location header)")
                 report(f"Redirect ({resp.status_code}) for {url} to {location}")
                 return None
-            elif resp.status_code == 200 or resp.status_code == 206:
+
+            if resp.status_code in (200, 206):
                 if not resp.encoding:
-                    resp.encoding = 'utf-8'
+                    resp.encoding = "utf-8"
                 return resp
-            elif resp.status_code in PERMANENT_FAILURE_STATUSES:
+
+            if resp.status_code in PERMANENT_FAILURE_STATUSES:
                 attempt += 1
-                report(f"HTTP {resp.status_code} (permanent, attempt {attempt}/{MAX_PERMANENT_RETRIES}): {url}")
-                if attempt > MAX_PERMANENT_RETRIES:
-                    report(f"Exceeded maximum retries for permanent error {url} (HTTP {resp.status_code})")
+                report(f"HTTP {resp.status_code} (permanent retry {attempt}/{MAX_HTTP_RETRIES})")
+
+                if attempt >= MAX_HTTP_RETRIES:
+                    report(f"Exceeded HTTP retries for {url}")
                     return None
-                else:
-                    time.sleep(delay)
-                    continue
-            else:
-                attempt += 1
-                report(f"HTTP {resp.status_code} (attempt {attempt}/{MAX_HTTP_RETRIES}): {url}")
-                if attempt > MAX_HTTP_RETRIES:
-                    report(f"Exceeded maximum retries for {url} (HTTP {resp.status_code})")
-                    return None
-                else:
-                    time.sleep(delay)
-                    continue
+
+                time.sleep(delay)
+                continue
+
+            attempt += 1
+            report(f"HTTP {resp.status_code} (retry {attempt}/{MAX_HTTP_RETRIES})")
+
+            if attempt >= MAX_HTTP_RETRIES:
+                report(f"Exceeded HTTP retries for {url}")
+                return None
+
+            time.sleep(delay)
+
         except requests.exceptions.RequestException as e:
-            report(f"Network error: {e}\nWaiting for connection to resume for {url}...")
+            network_attempt += 1
+            report(f"Network error: {e}")
+
+            if network_attempt >= MAX_NETWORK_RETRIES:
+                report(f"Exceeded network retries for {url}")
+                return None
+
+            report(f"Waiting for connection to resume for {url}... ({network_attempt}/{MAX_NETWORK_RETRIES})")
             time.sleep(3)
             continue
+
         except Exception as e:
             report(f"robust_get: Unexpected error: {e}")
             return None

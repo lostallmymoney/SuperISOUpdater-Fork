@@ -10,7 +10,7 @@ from datetime import datetime
 from functools import cache
 
 DOMAIN = "https://templeos.org"
-DOWNLOAD_PAGE_URL = f"{DOMAIN}/Downloads"
+DOWNLOAD_PAGE_URL = f"{DOMAIN}/Downloads/"
 FILE_NAME = "TempleOS_[[EDITION]]_[[VER]].ISO"
 ISOname = "TempleOS"
 
@@ -26,6 +26,7 @@ class TempleOS(GenericUpdater):
         )
         file_path = Path(folder_path) / FILE_NAME.replace("[[EDITION]]", self.edition)
         super().__init__(file_path, *args, **kwargs)
+        self.server_file_name = (f"TempleOS{'Lite' if self.edition == 'Lite' else ''}.ISO")
         resp = robust_get(DOWNLOAD_PAGE_URL, retries=self.retries_count, delay=1, logging_callback=self.logging_callback)
         if resp is None or resp.status_code != 200:
             self.download_page = None
@@ -33,12 +34,11 @@ class TempleOS(GenericUpdater):
             return
         self.download_page = resp
         self.soup_download_page = BeautifulSoup(self.download_page.content.decode("utf-8"), features="html.parser")
-        self.server_file_name = (f"TempleOS{'Lite' if self.edition == 'Lite' else ''}.ISO")
 
 
     @cache
     def _get_download_link(self) -> str | None:
-        return f"{DOWNLOAD_PAGE_URL}/{self.server_file_name}"
+        return f"{DOWNLOAD_PAGE_URL}{self.server_file_name}"
 
     def check_integrity(self) -> bool | int | None:
         local_file = self._get_complete_normalized_file_path(absolute=True)
@@ -47,7 +47,7 @@ class TempleOS(GenericUpdater):
             return -1
         if verify_file_size(local_file, download_link, logging_callback=self.logging_callback) is False:
             return False
-        md5_url = f"{DOWNLOAD_PAGE_URL}/md5sums.txt"
+        md5_url = f"{DOWNLOAD_PAGE_URL}md5sums.txt"
         resp = robust_get(md5_url, retries=self.retries_count, delay=1, logging_callback=self.logging_callback)
         if resp is None or resp.status_code != 200:
             self.logging_callback("Could not fetch md5sums.txt; skipping integrity check.")
@@ -60,6 +60,9 @@ class TempleOS(GenericUpdater):
 
     @cache
     def _get_latest_version(self) -> list[str] | None:
+        if self.soup_download_page is None:
+            self.logging_callback("Could not load TempleOS download page.")
+            return None
         file_list_soup: Tag | None = self.soup_download_page.find("pre")  # type: ignore
         if not file_list_soup:
             self.logging_callback("Could not find download links list.")

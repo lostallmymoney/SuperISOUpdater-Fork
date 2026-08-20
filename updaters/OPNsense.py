@@ -46,7 +46,7 @@ class OPNsense(GenericUpdater):
             return -1
 
         latest_version_str = self._version_to_str(latest_version)
-        pub_url = f"{DOWNLOAD_PAGE_URL}/OPNsense-{latest_version_str.rsplit(".", 1)[0]}.pub"
+        pub_url = f"{DOWNLOAD_PAGE_URL}/OPNsense-{latest_version_str}.pub"
         sig_url = f"{DOWNLOAD_PAGE_URL}/OPNsense-{latest_version_str}-{self.edition}-amd64.img.sig"
         image_path = self._get_complete_normalized_file_path(absolute=True)
 

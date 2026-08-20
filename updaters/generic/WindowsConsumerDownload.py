@@ -1,8 +1,9 @@
 import re
+import time
 import uuid
 from datetime import datetime
 
-from updaters.shared.robust_get import robust_get
+import requests
 
 
 
@@ -57,6 +58,9 @@ class WindowsConsumerDownloader:
             self.ISOname = colored_name
         else:
             self.ISOname = base_name
+        self.session = requests.Session()
+        self.session_id = str(uuid.uuid4())
+        self.session_authorized = False
 
     def logging_callback(self, message: str):
         prefix = f"[{getattr(self, 'ISOname', self.__class__.__name__)}]"
@@ -67,20 +71,61 @@ class WindowsConsumerDownloader:
         else:
             print(message)
 
-    _SESSION_ID = uuid.uuid4()
     _PROFILE_ID = "606624d44113"
     _ORG_ID = "y6jn8c31"
 
     _HEADERS = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "referer": "localhost",
+        "Accept-Language": "en-US,en;q=0.9",
     }
 
-    _session_authorized = False
     _download_page_cache = {}
     _language_skuIDs_cache = {}
     _download_link_cache = {}
+
+    def _download_page_url(self, windows_version: str) -> str:
+        match windows_version:
+            case "11":
+                url_segment = f"windows{windows_version}"
+            case "10" | "8":
+                url_segment = f"windows{windows_version}ISO"
+            case _:
+                raise NotImplementedError(
+                    "The valid Windows versions are '11', '10', or '8'."
+                )
+        return f"https://www.microsoft.com/en-us/software-download/{url_segment}"
+
+    def _request(self, url: str, retries: int = 3, timeout: float = 10.0, **kwargs):
+        headers = {
+            **self._HEADERS,
+            **kwargs.pop("headers", {}),
+        }
+        self.logging_callback(f"[robust_get] Fetching URL: {url}")
+        for attempt in range(1, retries + 1):
+            try:
+                resp = self.session.get(url, headers=headers, timeout=timeout, **kwargs)
+            except requests.exceptions.RequestException as e:
+                self.logging_callback(f"Network error: {e}")
+                if attempt >= retries:
+                    self.logging_callback(f"Exceeded network retries for {url}")
+                    return None
+                self.logging_callback(f"Waiting for connection to resume for {url}... ({attempt}/{retries})")
+                time.sleep(3)
+                continue
+
+            if resp.status_code == 200:
+                if not resp.encoding:
+                    resp.encoding = "utf-8"
+                return resp
+
+            self.logging_callback(f"HTTP {resp.status_code} (retry {attempt}/{retries})")
+            if attempt >= retries:
+                self.logging_callback(f"Exceeded HTTP retries for {url}")
+                return None
+            time.sleep(1)
+
+        return None
 
     def windows_consumer_file_hash(self, windows_version: str, lang: str) -> str:
         """
@@ -108,23 +153,13 @@ class WindowsConsumerDownloader:
         return file_hash
 
     def _get_download_page(self, windows_version: str) -> str:
-        match windows_version:
-            case "11":
-                url_segment = f"windows{windows_version}"
-            case "10" | "8":
-                url_segment = f"windows{windows_version}ISO"
-            case _:
-                raise NotImplementedError(
-                    "The valid Windows versions are '11', '10', or '8'."
-                )
+        page_url = self._download_page_url(windows_version)
+        url_segment = page_url.rsplit("/", 1)[-1]
 
         if not url_segment in WindowsConsumerDownloader._download_page_cache:
-            resp = robust_get(
-                f"https://www.microsoft.com/en-us/software-download/{url_segment}",
-                headers=WindowsConsumerDownloader._HEADERS,
-                retries=3,
-                delay=1,
-                logging_callback=self.logging_callback,
+            resp = self._request(
+                page_url,
+                headers={"Referer": "https://www.microsoft.com/en-us/software-download/"},
             )
             if resp is None or getattr(resp, 'status_code', 200) != 200:
                 raise RuntimeError(
@@ -161,14 +196,17 @@ class WindowsConsumerDownloader:
         product_edition_id = matches.group(1)
         log(f"[windows_consumer_download] Product edition id: `{product_edition_id}`")
 
-        if not self._session_authorized:
-            robust_get(
-                f"https://vlscppe.microsoft.com/tags?org_id={self._ORG_ID}&session_id={self._SESSION_ID}",
-                retries=3,
-                delay=1,
-                logging_callback=self.logging_callback,
+        page_url = self._download_page_url(windows_version)
+        referer_header = {"Referer": page_url}
+
+        if not self.session_authorized:
+            resp = self._request(
+                f"https://vlscppe.microsoft.com/tags?org_id={self._ORG_ID}&session_id={self.session_id}",
+                headers=referer_header,
             )
-            self._session_authorized = True
+            if resp is None:
+                raise RuntimeError("Could not authorize Windows download session")
+            self.session_authorized = True
 
         if product_edition_id not in self._language_skuIDs_cache:
             language_skuIDs_url = (
@@ -178,16 +216,13 @@ class WindowsConsumerDownloader:
                 + f"&SKU=undefined"
                 + f"&friendlyFileName=undefined"
                 + f"&Locale=en-US"
-                + f"&sessionID={self._SESSION_ID}"
+                + f"&sessionID={self.session_id}"
             )
             # concise log only
             log(f"[windows_consumer_download] Fetching SKU info")
-            resp = robust_get(
+            resp = self._request(
                 language_skuIDs_url,
-                headers=self._HEADERS,
-                retries=3,
-                delay=1,
-                logging_callback=self.logging_callback,
+                headers=referer_header,
             )
             if resp is None or getattr(resp, 'status_code', 200) != 200:
                 log("[windows_consumer_download] Could not fetch SKU info (no response or bad status)")
@@ -224,25 +259,22 @@ class WindowsConsumerDownloader:
 
         if (
             sku_id not in self._download_link_cache
-            or datetime.now() < self._download_link_cache[sku_id]["expires"]
+            or datetime.now() >= self._download_link_cache[sku_id]["expires"]
         ):
             # Get ISO download link page
             iso_download_link_page = (
                 "https://www.microsoft.com/software-download-connector/api/GetProductDownloadLinksBySku"
                 + f"?profile={self._PROFILE_ID}"
-                + "&productEditionId=undefined"
+                + f"&productEditionId={product_edition_id}"
                 + f"&SKU={sku_id}"
                 + "&friendlyFileName=undefined"
                 + f"&Locale=en-US"
-                + f"&sessionID={self._SESSION_ID}"
+                + f"&sessionID={self.session_id}"
             )
             log(f"[windows_consumer_download] Fetching ISO download link from: {iso_download_link_page}")
-            resp = robust_get(
+            resp = self._request(
                 iso_download_link_page,
-                headers=self._HEADERS,
-                retries=3,
-                delay=1,
-                logging_callback=self.logging_callback,
+                headers=referer_header,
             )
             if resp is None or getattr(resp, 'status_code', 200) != 200:
                 log(f"[windows_consumer_download] Could not fetch ISO download link page, status: {getattr(resp, 'status_code', 'NO STATUS')}")
