@@ -1,7 +1,5 @@
 from functools import cache
 from pathlib import Path
-from bs4 import BeautifulSoup
-from bs4.element import Tag
 from updaters.generic.GenericUpdater import GenericUpdater
 from updaters.shared.parse_hash import parse_hash
 from updaters.shared.sha256_hash_check import sha256_hash_check
@@ -68,8 +66,8 @@ class Proxmox(GenericUpdater):
             return None
 
         lines = resp.text.splitlines()
-        prefix = f"proxmox-{self.edition}_"
-        versions: list[list[str]] = []
+        filename_regex = re.compile(rf"^proxmox-{re.escape(self.edition)}_(\d+(?:\.\d+)*)-(\d+)\.iso$")
+        versions: list[tuple[tuple[int, ...], int, list[str]]] = []
 
         for line in lines:
             parts = line.strip().split()
@@ -77,31 +75,18 @@ class Proxmox(GenericUpdater):
                 continue
 
             filename = parts[1]
-
-            if not filename.startswith(prefix):
+            match = filename_regex.match(filename)
+            if not match:
                 continue
-
-            if re.search(r"[a-f0-9]{6,}-\d+", filename):
-                continue
-
-            try:
-                version_part = filename.split("_", 1)[1].replace(".iso", "")
-                base, dash = version_part.split("-", 1)
-                versions.append(base.split(".") + [dash])
-            except Exception:
-                continue
+            base, build = match.groups()
+            version_parts = tuple(int(part) for part in base.split("."))
+            versions.append((version_parts, int(build), base.split(".") + [build]))
 
         if not versions:
             self.logging_callback("No valid versions found in SHA256SUMS")
             return None
 
-        latest = versions[0]
-
-        for v in versions[1:]:
-            if self._compare_version_numbers(latest, v) > 0:
-                latest = v
-
-        return latest
+        return max(versions, key=lambda version: (version[0], version[1]))[2]
 
     def check_integrity(self) -> bool | int | None:
         sha256_url = f"{DOWNLOAD_PAGE_URL}/SHA256SUMS"
