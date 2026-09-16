@@ -23,9 +23,12 @@ def robust_get(
     MAX_HTTP_RETRIES = retries if retries != -1 else 10
     MAX_NETWORK_RETRIES = retries if retries != -1 else 10
 
+    req_kwargs = kwargs.copy()
+    base_headers = req_kwargs.pop("headers", {}).copy()
+
     while True:
         try:
-            headers = kwargs.pop("headers", {}).copy()
+            headers = base_headers.copy()
 
             resp = requests.request(
                 method,
@@ -33,7 +36,7 @@ def robust_get(
                 headers=headers,
                 timeout=timeout,
                 allow_redirects=redirects,
-                **kwargs
+                **req_kwargs
             )
 
             if resp.status_code in {301, 302, 303, 307, 308}:

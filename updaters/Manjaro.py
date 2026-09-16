@@ -9,10 +9,16 @@ from updaters.shared.sha256_hash_check import sha256_hash_check
 from updaters.shared.sha512_hash_check import sha512_hash_check
 from updaters.shared.md5_hash_check import md5_hash_check
 
+import json
 DOMAIN = "https://gitlab.manjaro.org"
 PRIMARY_DOWNLOAD_PAGE_URL = f"{DOMAIN}/web/iso-info/-/raw/master/file-info.json"
+OFFICIAL_PAYLOAD_URL = "https://manjaro.org/products/download/x86/_payload.json"
 FALLBACK_DOWNLOAD_PAGE_URL = f"{DOMAIN}/fhdk/iso-info/-/raw/master/file-info.json"
-DOWNLOAD_PAGE_URLS = [PRIMARY_DOWNLOAD_PAGE_URL, FALLBACK_DOWNLOAD_PAGE_URL]
+DOWNLOAD_PAGE_URLS = [
+    PRIMARY_DOWNLOAD_PAGE_URL,
+    OFFICIAL_PAYLOAD_URL,
+    FALLBACK_DOWNLOAD_PAGE_URL,
+]
 FILE_NAME = "manjaro-[[EDITION]]-[[VER]]-linux.iso"
 
 ISOname = "Manjaro"
@@ -40,18 +46,23 @@ class Manjaro(GenericUpdater):
         payloads = []
         for url in DOWNLOAD_PAGE_URLS:
             self.logging_callback(f"Fetching metadata from {url}")
-            resp = robust_get(url, retries=self.retries_count, delay=1, logging_callback=self.logging_callback)
+            resp = robust_get(url, retries=max(self.retries_count, 2), delay=1, timeout=35, headers={"User-Agent": "Mozilla/5.0"}, logging_callback=self.logging_callback)
             if resp is None:
                 continue
             try:
-                payload = resp.json()
+                if "_payload.json" in url:
+                    payload = self._parse_nuxt_payload(resp.json())
+                else:
+                    payload = resp.json()
             except Exception as exc:
                 self.logging_callback(f"Metadata payload invalid for {url}: {exc}")
                 continue
-            payloads.append(payload)
+            if payload and (payload.get("official") or payload.get("community")):
+                payloads.append(payload)
+                break
 
         if not payloads:
-            self.logging_callback("Unable to load release metadata from all known GitLab endpoints.")
+            self.logging_callback("Unable to load release metadata from all known endpoints.")
             return
 
         merged = {"official": {}, "community": {}}
@@ -76,6 +87,20 @@ class Manjaro(GenericUpdater):
             self.logging_callback(f"No release metadata found for edition '{self.edition}'.")
             return None
         return release.get("image")
+
+    @staticmethod
+    def _parse_nuxt_payload(data: list) -> dict | None:
+        if not isinstance(data, list):
+            return None
+        for item in data:
+            if isinstance(item, str) and "plasma" in item and "official" in item:
+                try:
+                    parsed = json.loads(item)
+                    if "official" in parsed:
+                        return parsed
+                except Exception:
+                    pass
+        return None
 
     @staticmethod
     def _release_version_from_image(image_url: str | None) -> tuple[int, ...] | None:
@@ -112,7 +137,7 @@ class Manjaro(GenericUpdater):
         if not verify_file_size(local_file, download_link, logging_callback=self.logging_callback):
             return False
         # Hash check
-        resp = robust_get(checksum_url, retries=3, delay=1, logging_callback=self.logging_callback)
+        resp = robust_get(checksum_url, retries=3, delay=1, timeout=20, headers={"User-Agent": "Mozilla/5.0"}, logging_callback=self.logging_callback)
         if resp is None:
             self.logging_callback(f"Could not fetch checksum file: robust_get failed")
             return -1

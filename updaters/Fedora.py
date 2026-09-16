@@ -7,7 +7,11 @@ from updaters.shared.check_remote_integrity import check_remote_integrity
 from updaters.shared.verify_file_size import verify_file_size
 from updaters.shared.robust_get import robust_get
 
-BASE_URL = "https://download.fedoraproject.org/pub/fedora/linux/releases"
+# dl.fedoraproject.org is the canonical master repository hosted directly by Fedora.
+# download.fedoraproject.org is a redirector that can land on stale third-party mirrors.
+BASE_URL = "https://dl.fedoraproject.org/pub/fedora/linux/releases"
+FALLBACK_BASE_URL = "https://download.fedoraproject.org/pub/fedora/linux/releases"
+LISTING_BASE_URLS = (BASE_URL, FALLBACK_BASE_URL)
 FILE_NAME = "Fedora-[[EDITION]]-Live-x86_64-[[VER]].iso"
 ISOname = "Fedora"
 
@@ -28,20 +32,33 @@ class Fedora(GenericUpdater):
         self.soup_download_page = BeautifulSoup("", features="html.parser")
 
     @cache
+    def _find_iso_filename(self, major: str) -> str | None:
+        for base in LISTING_BASE_URLS:
+            iso_dir = robust_get(f"{base}/{major}/Spins/x86_64/iso/", logging_callback=self.logging_callback, timeout=20)
+            if not iso_dir or getattr(iso_dir, 'status_code', 0) != 200:
+                continue
+            names = []
+            for href in re.findall(r'href=["\']([^"\']+)["\']', iso_dir.text):
+                name = href.rsplit('/', 1)[-1].split('?', 1)[0]
+                if name.endswith('.iso') and 'Live' in name and self.edition.lower() in name.lower():
+                    names.append(name)
+            if names:
+                # Prefer the regular Live image over the "-Mobile" variant.
+                names.sort(key=lambda name: ('mobile' in name.lower(), name))
+                return names[0]
+        self.logging_callback(f"Could not fetch ISO listing for Fedora {major}.")
+        return None
+
+    @cache
     def _get_download_link(self) -> str | None:
         latest_version = self._get_latest_version()
         if not latest_version or not isinstance(latest_version, list) or not latest_version[0]:
             return None
         major = latest_version[0]
-        iso_dir = robust_get(f"{BASE_URL}/{major}/Spins/x86_64/iso/", logging_callback=self.logging_callback, timeout=20)
-        if not iso_dir or getattr(iso_dir, 'status_code', 0) != 200:
-            self.logging_callback(f"Could not fetch ISO listing for Fedora {major}.")
+        iso_filename = self._find_iso_filename(major)
+        if not iso_filename:
             return None
-
-        for href in re.findall(r'href=["\']([^"\']+)["\']', iso_dir.text):
-            if href.endswith('.iso') and 'Live' in href and self.edition.lower() in href.lower():
-                return f"{BASE_URL}/{major}/Spins/x86_64/iso/{href}"
-        return None
+        return f"{BASE_URL}/{major}/Spins/x86_64/iso/{iso_filename}"
 
     def check_integrity(self) -> bool | int | None:
         latest_version = self._get_latest_version()
@@ -83,42 +100,39 @@ class Fedora(GenericUpdater):
         return True
 
     @cache
-    def _get_latest_version(self) -> list[str] | None:
-        release_index = robust_get(f"{BASE_URL}/", logging_callback=self.logging_callback, timeout=20)
-        if not release_index or getattr(release_index, 'status_code', 0) != 200:
-            self.logging_callback(f"Could not fetch Fedora release index from {BASE_URL}.")
-            return None
+    def _get_release_index(self) -> list[str] | None:
+        for base in LISTING_BASE_URLS:
+            release_index = robust_get(f"{base}/", logging_callback=self.logging_callback, timeout=20)
+            if not release_index or getattr(release_index, 'status_code', 0) != 200:
+                continue
+            releases = sorted(
+                {match for match in re.findall(r'href=["\']?(?:\.\.?/)?(\d+)/?["\']?', release_index.text) if match.isdigit()},
+                key=lambda x: int(x),
+                reverse=True,
+            )
+            if releases:
+                return releases
+        self.logging_callback("Could not determine latest Fedora release from the release index.")
+        return None
 
-        releases = sorted(
-            {match for match in re.findall(r'href=["\']?(\d+)[/"\']?', release_index.text) if match.isdigit()},
-            key=lambda x: int(x),
-            reverse=True,
-        )
+    @cache
+    def _get_latest_version(self) -> list[str] | None:
+        releases = self._get_release_index()
         if not releases:
-            self.logging_callback("Could not determine latest Fedora release from the release index.")
             return None
 
         latest_major = releases[0]
-        iso_dir = robust_get(f"{BASE_URL}/{latest_major}/Spins/x86_64/iso/", logging_callback=self.logging_callback, timeout=20)
-        if not iso_dir or getattr(iso_dir, 'status_code', 0) != 200:
-            self.logging_callback(f"Could not fetch ISO listing for Fedora {latest_major}.")
-            return None
-
-        iso_link = None
-        for href in re.findall(r'href=["\']([^"\']+)["\']', iso_dir.text):
-            if href.endswith('.iso') and 'Live' in href and self.edition.lower() in href.lower():
-                iso_link = href
-                break
-        if not iso_link:
+        iso_filename = self._find_iso_filename(latest_major)
+        if not iso_filename:
             self.logging_callback(f"Could not find Fedora ISO link. Edition: {self.edition}, major: {latest_major}")
             return None
 
         m = re.search(
             rf"Fedora-{re.escape(self.edition)}(?:-Mobile)?-Live(?:-x86_64)?-(\d+)-([\d.]+)(?:\.x86_64)?\.iso$",
-            iso_link,
+            iso_filename,
             flags=re.IGNORECASE,
         )
         if not m:
-            self.logging_callback(f"Could not extract version from ISO link: {iso_link}")
+            self.logging_callback(f"Could not extract version from ISO link: {iso_filename}")
             return None
         return [m.group(1), m.group(2)]
